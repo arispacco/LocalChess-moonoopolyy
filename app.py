@@ -5,6 +5,13 @@ import chess.pgn
 import chess.engine
 import os, time, socket, sqlite3, io, random, string
 
+from monopoly import (
+    new_monopoly_game, add_player as mono_add_player, start_game as mono_start_game,
+    process_roll, buy_property, build_house, sell_house,
+    mortgage_property, unmortgage_property, pay_jail_fine, use_jail_free_card,
+    end_turn as mono_end_turn, get_public_state, BOARD as MONO_BOARD, roll_dice,
+)
+
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'chess_arena_dev_key_change_me_in_prod')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
@@ -36,6 +43,13 @@ def init_db():
                   room_id TEXT NOT NULL,
                   white TEXT, black TEXT,
                   result TEXT, pgn TEXT,
+                  played_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS monopoly_history
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  room_id TEXT NOT NULL,
+                  players TEXT,
+                  winner TEXT,
+                  duration INTEGER,
                   played_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
     conn.commit(); conn.close()
 
@@ -142,6 +156,10 @@ def save_game_result(room, result):
 
 games = {}
 player_sessions = {}
+
+# ─── MONOPOLY STATE ──────────────────────────────────────────────────────────
+monopoly_games = {}
+mono_sessions = {}  # {sid: {'room': room_id, 'player_idx': idx}}
 
 def new_game_state(mode, username, level, base, inc):
     return {
@@ -483,5 +501,294 @@ def _do_rematch(old_room, old_game):
 
     socketio.emit('rematch_start', {'new_room': new_room}, to=old_room)
 
+# ─── PROPERTY TYCOON ROUTES ──────────────────────────────────────────────────
+
+@app.route('/tycoon')
+def tycoon_lobby():
+    if 'username' not in session: return redirect(url_for('login'))
+    return render_template('monopoly_lobby.html',
+                           username=session['username'],
+                           local_ip=get_best_ip())
+
+@app.route('/tycoon/game/<room_id>')
+def tycoon_game(room_id):
+    if 'username' not in session: return redirect(url_for('login'))
+    return render_template('monopoly.html',
+                           username=session['username'],
+                           room_id=room_id,
+                           local_ip=get_best_ip(),
+                           board=MONO_BOARD)
+
+def _save_monopoly_result(game):
+    if game['status'] != 'finished': return
+    players_str = ','.join(p['name'] for p in game['players'])
+    winner = game['players'][game['winner']]['name'] if game['winner'] is not None else ''
+    start_time = game['start_time']
+    duration = int(time.time() - start_time) if start_time is not None else 0
+    conn = get_db(); c = conn.cursor()
+    c.execute("INSERT INTO monopoly_history (room_id, players, winner, duration) VALUES (?,?,?,?)",
+              (game['room_id'], players_str, winner, duration))
+    conn.commit(); conn.close()
+
+# ─── PROPERTY TYCOON SOCKET EVENTS ───────────────────────────────────────────
+
+@socketio.on('mono_create')
+def mono_on_create(data):
+    username = session.get('username', 'Anonyme')
+    room_id = 'mono_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=9))
+    game = new_monopoly_game(username, room_id)
+    ok, result = mono_add_player(game, username, request.sid)
+    if not ok:
+        emit('mono_error', {'msg': result}); return
+    monopoly_games[room_id] = game
+    join_room(room_id)
+    mono_sessions[request.sid] = {'room': room_id, 'player_idx': result}
+    emit('mono_created', {'room_id': room_id})
+    emit('mono_state', get_public_state(game))
+
+@socketio.on('mono_join')
+def mono_on_join(data):
+    room_id = data.get('room_id', '')
+    username = session.get('username', 'Anonyme')
+    if room_id not in monopoly_games:
+        emit('mono_error', {'msg': 'Salon introuvable.'}); return
+    game = monopoly_games[room_id]
+
+    # Check if player is reconnecting (already in the game)
+    existing_idx = next(
+        (i for i, p in enumerate(game['players']) if p['name'] == username), None
+    )
+    if existing_idx is not None:
+        # Reconnect: update sid, re-join room, send current state
+        game['players'][existing_idx]['sid'] = request.sid
+        join_room(room_id)
+        mono_sessions[request.sid] = {'room': room_id, 'player_idx': existing_idx}
+        emit('mono_joined', {'player_idx': existing_idx})
+        emit('mono_state', get_public_state(game))
+        return
+
+    ok, result = mono_add_player(game, username, request.sid)
+    if not ok:
+        emit('mono_error', {'msg': result}); return
+    join_room(room_id)
+    mono_sessions[request.sid] = {'room': room_id, 'player_idx': result}
+    emit('mono_joined', {'player_idx': result})
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_start')
+def mono_on_start(data):
+    room_id = data.get('room_id', '')
+    username = session.get('username', 'Anonyme')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    if game['host'] != username:
+        emit('mono_error', {'msg': 'Seul l\'hôte peut démarrer la partie.'}); return
+    ok, err = mono_start_game(game)
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_roll')
+def mono_on_roll(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or player_idx != game['current_player_idx']: return
+    if game['phase'] != 'roll' or game['status'] != 'playing': return
+    d1, d2 = roll_dice()
+    events = process_roll(game, player_idx, d1, d2)
+    socketio.emit('mono_events', {'events': events}, to=room_id)
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+    if game['status'] == 'finished':
+        _save_monopoly_result(game)
+
+@socketio.on('mono_buy')
+def mono_on_buy(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or player_idx != game['current_player_idx']: return
+    if game['status'] != 'playing': return
+    ok, err = buy_property(game, player_idx)
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_build')
+def mono_on_build(data):
+    room_id = data.get('room_id', '')
+    pos = data.get('pos', -1)
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or game['status'] != 'playing': return
+    ok, err = build_house(game, player_idx, int(pos))
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_sell_house')
+def mono_on_sell_house(data):
+    room_id = data.get('room_id', '')
+    pos = data.get('pos', -1)
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or game['status'] != 'playing': return
+    ok, err = sell_house(game, player_idx, int(pos))
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_mortgage')
+def mono_on_mortgage(data):
+    room_id = data.get('room_id', '')
+    pos = data.get('pos', -1)
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or game['status'] != 'playing': return
+    ok, err = mortgage_property(game, player_idx, int(pos))
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_unmortgage')
+def mono_on_unmortgage(data):
+    room_id = data.get('room_id', '')
+    pos = data.get('pos', -1)
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or game['status'] != 'playing': return
+    ok, err = unmortgage_property(game, player_idx, int(pos))
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_pay_jail')
+def mono_on_pay_jail(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or player_idx != game['current_player_idx']: return
+    ok, err = pay_jail_fine(game, player_idx)
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_use_jail_free')
+def mono_on_jail_free(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or player_idx != game['current_player_idx']: return
+    ok, err = use_jail_free_card(game, player_idx)
+    if not ok:
+        emit('mono_error', {'msg': err}); return
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_end_turn')
+def mono_on_end_turn(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    if player_idx is None or player_idx != game['current_player_idx']: return
+    if game['phase'] not in ('action', 'end'): return
+    mono_end_turn(game, player_idx)
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_trade_offer')
+def mono_on_trade_offer(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    info = mono_sessions.get(request.sid, {})
+    from_idx = info.get('player_idx')
+    to_idx = int(data.get('to_idx', -1))
+    if from_idx is None or to_idx < 0 or to_idx >= len(game['players']): return
+    if to_idx == from_idx: return
+    if game['players'][to_idx]['bankrupt']: return
+    game['pending_trade'] = {
+        'from': from_idx,
+        'to': to_idx,
+        'offer_money': max(0, int(data.get('offer_money', 0))),
+        'offer_props': [int(p) for p in data.get('offer_props', [])],
+        'request_money': max(0, int(data.get('request_money', 0))),
+        'request_props': [int(p) for p in data.get('request_props', [])],
+    }
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_trade_respond')
+def mono_on_trade_respond(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    game = monopoly_games[room_id]
+    if not game['pending_trade']: return
+    info = mono_sessions.get(request.sid, {})
+    player_idx = info.get('player_idx')
+    trade = game['pending_trade']
+    if player_idx != trade['to']:
+        emit('mono_error', {'msg': 'Cette offre ne vous est pas destinée.'}); return
+    accept = bool(data.get('accept', False))
+    if accept:
+        from_p = game['players'][trade['from']]
+        to_p   = game['players'][trade['to']]
+        if from_p['money'] < trade['offer_money'] or to_p['money'] < trade['request_money']:
+            emit('mono_error', {'msg': 'Fonds insuffisants pour cet échange.'}); return
+        from_p['money'] -= trade['offer_money']
+        to_p['money']   += trade['offer_money']
+        from_p['money'] += trade['request_money']
+        to_p['money']   -= trade['request_money']
+        for pos in trade['offer_props']:
+            if game['property_owners'].get(pos) == trade['from']:
+                game['property_owners'][pos] = trade['to']
+        for pos in trade['request_props']:
+            if game['property_owners'].get(pos) == trade['to']:
+                game['property_owners'][pos] = trade['from']
+        game['log'].append({'text': f"🤝 Échange accepté entre {from_p['name']} et {to_p['name']}.", 'color': '#aaaaaa'})
+    else:
+        game['log'].append({'text': '❌ Échange refusé.', 'color': '#aaaaaa'})
+    game['pending_trade'] = None
+    socketio.emit('mono_state', get_public_state(game), to=room_id)
+
+@socketio.on('mono_get_state')
+def mono_on_get_state(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    emit('mono_state', get_public_state(monopoly_games[room_id]))
+
+@socketio.on('mono_get_rooms')
+def mono_on_get_rooms():
+    rooms = [
+        {'room_id': rid, 'host': g['host'], 'players': len(g['players'])}
+        for rid, g in monopoly_games.items() if g['status'] == 'waiting'
+    ]
+    emit('mono_rooms', rooms)
+
+@socketio.on('mono_chat')
+def mono_on_chat(data):
+    room_id = data.get('room_id', '')
+    if room_id not in monopoly_games: return
+    username = session.get('username', 'Anonyme')
+    msg = str(data.get('msg', '')).strip()[:200]
+    if not msg: return
+    socketio.emit('mono_chat_msg', {'user': username, 'msg': msg}, to=room_id)
+
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+
