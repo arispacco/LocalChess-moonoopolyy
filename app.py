@@ -523,7 +523,8 @@ def _save_monopoly_result(game):
     if game['status'] != 'finished': return
     players_str = ','.join(p['name'] for p in game['players'])
     winner = game['players'][game['winner']]['name'] if game['winner'] is not None else ''
-    duration = int(time.time() - (game['start_time'] or time.time()))
+    start_time = game['start_time']
+    duration = int(time.time() - start_time) if start_time is not None else 0
     conn = get_db(); c = conn.cursor()
     c.execute("INSERT INTO monopoly_history (room_id, players, winner, duration) VALUES (?,?,?,?)",
               (game['room_id'], players_str, winner, duration))

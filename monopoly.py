@@ -281,8 +281,9 @@ def process_roll(game, player_idx, d1, d2):
     old_pos = p['position']
     new_pos = (old_pos + total) % 40
 
-    # Passing GO (but not landing exactly on it via advance_to)
-    if new_pos < old_pos or (old_pos == 0 and total > 0):
+    # Passing GO: only when new_pos < old_pos (board wrapped around).
+    # A player starting at position 0 and moving forward does NOT collect again.
+    if new_pos < old_pos:
         p['money'] += 200
         _add_log(game, f"{p['token']} {p['name']} passe par Départ → +200€", player_idx)
         events.append({'type': 'collect_go', 'player': player_idx})
@@ -406,7 +407,9 @@ def _apply_card(game, player_idx, card, dice_total):
     elif action == 'goto_railway_near':
         current = p['position']
         nearest = min(RAILWAY_POSITIONS, key=lambda r: (r - current) % 40)
-        passing_go = (nearest - current) % 40 < current or nearest < current
+        # Player passes GO if the nearest railway has a lower position number
+        # (meaning the clockwise path from current wraps past position 0)
+        passing_go = nearest < current
         _advance_to(game, player_idx, nearest, passing_go)
         events.append({'type': 'move', 'player': player_idx, 'position': nearest})
         # Double rent if owned
