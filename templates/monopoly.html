@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>🏠 Property Tycoon</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/monopoly.css') }}">
+</head>
+<body>
+
+<!-- ── WAITING ROOM ────────────────────────────────────────── -->
+<div id="waiting-room" class="screen">
+    <div class="waiting-card">
+        <h1>🏠 PROPERTY TYCOON</h1>
+        <p class="room-code-label">Code du salon :</p>
+        <div class="room-code" id="room-code-display">{{ room_id }}</div>
+        <p class="waiting-hint">Partagez ce code avec vos amis (2–6 joueurs)</p>
+
+        <div id="player-list" class="player-list"></div>
+
+        <div id="start-area" class="hidden">
+            <button id="start-btn" class="btn-tycoon btn-create btn-full" onclick="startGame()">
+                🎮 DÉMARRER LA PARTIE
+            </button>
+        </div>
+        <p id="waiting-msg" style="color:#888;text-align:center;margin-top:16px;">En attente d'autres joueurs…</p>
+
+        <a href="/tycoon" class="btn-tycoon btn-ghost btn-full" style="margin-top:12px;display:block;text-align:center;">← RETOUR AU LOBBY</a>
+    </div>
+</div>
+
+<!-- ── GAME SCREEN ────────────────────────────────────────── -->
+<div id="game-screen" class="screen hidden">
+
+    <!-- WINNER OVERLAY -->
+    <div id="winner-overlay" class="winner-overlay hidden">
+        <div class="winner-card">
+            <div id="winner-icon" style="font-size:64px;"></div>
+            <div id="winner-title" class="winner-title"></div>
+            <div id="winner-sub" class="winner-sub"></div>
+            <button class="btn-tycoon btn-ghost" onclick="window.location.href='/tycoon'">🚪 RETOUR AU LOBBY</button>
+        </div>
+    </div>
+
+    <!-- TRADE MODAL -->
+    <div id="trade-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <h2>🤝 Proposer un échange</h2>
+            <div class="trade-grid">
+                <div>
+                    <label>Destinataire</label>
+                    <select id="trade-to"></select>
+                </div>
+                <div>
+                    <label>Vous offrez (€)</label>
+                    <input id="trade-offer-money" type="number" min="0" value="0">
+                </div>
+                <div>
+                    <label>Vous demandez (€)</label>
+                    <input id="trade-req-money" type="number" min="0" value="0">
+                </div>
+            </div>
+            <label>Propriétés que vous offrez</label>
+            <div id="trade-offer-props" class="prop-checkboxes"></div>
+            <label>Propriétés que vous demandez</label>
+            <div id="trade-req-props" class="prop-checkboxes"></div>
+            <div class="btn-row" style="margin-top:16px;">
+                <button class="btn-tycoon btn-create" onclick="sendTradeOffer()">ENVOYER</button>
+                <button class="btn-tycoon btn-ghost" onclick="closeTrade()">ANNULER</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- INCOMING TRADE MODAL -->
+    <div id="incoming-trade-modal" class="modal-overlay hidden">
+        <div class="modal-card">
+            <h2>🤝 Offre d'échange reçue</h2>
+            <div id="incoming-trade-desc" style="margin:16px 0;line-height:1.7;"></div>
+            <div class="btn-row">
+                <button class="btn-tycoon btn-create" onclick="respondTrade(true)">✅ ACCEPTER</button>
+                <button class="btn-tycoon btn-danger" onclick="respondTrade(false)">❌ REFUSER</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CARD POPUP -->
+    <div id="card-popup" class="card-popup hidden">
+        <div class="card-popup-inner">
+            <div id="card-popup-type"></div>
+            <div id="card-popup-text"></div>
+            <button onclick="closeCard()">OK</button>
+        </div>
+    </div>
+
+    <div class="game-layout">
+
+        <!-- LEFT: BOARD -->
+        <div class="board-area">
+            <div class="mono-board" id="mono-board">
+                {% for space in board %}
+                <div class="cell
+                    {% if space.type == 'go' %} corner cell-go
+                    {% elif space.type == 'jail' %} corner cell-jail
+                    {% elif space.type == 'free_parking' %} corner cell-free
+                    {% elif space.type == 'go_to_jail' %} corner cell-gtj
+                    {% else %}
+                        {% if space.pos in [1,2,3,4,5,6,7,8,9] %} bottom-row
+                        {% elif space.pos in [11,12,13,14,15,16,17,18,19] %} left-col
+                        {% elif space.pos in [21,22,23,24,25,26,27,28,29] %} top-row
+                        {% elif space.pos in [31,32,33,34,35,36,37,38,39] %} right-col
+                        {% endif %}
+                    {% endif %}"
+                    id="cell-{{ space.pos }}"
+                    data-pos="{{ space.pos }}"
+                    data-type="{{ space.type }}"
+                    {% if space.type == 'property' %}data-color="{{ space.color }}"{% endif %}>
+
+                    {% if space.type == 'property' %}
+                        <div class="color-strip color-{{ space.color }}"></div>
+                    {% endif %}
+                    <div class="cell-inner">
+                        <div class="cell-name">{{ space.name }}</div>
+                        {% if space.type in ['property', 'railway', 'utility'] %}
+                            <div class="cell-price">{{ space.price }}€</div>
+                        {% elif space.type == 'tax' %}
+                            <div class="cell-price">-{{ space.amount }}€</div>
+                        {% elif space.type == 'go' %}
+                            <div class="go-label">DÉPART<br><small>→ 200€</small></div>
+                        {% elif space.type == 'jail' %}
+                            <div class="jail-label">🔒 PRISON<br><small>Visite</small></div>
+                        {% elif space.type == 'free_parking' %}
+                            <div class="fp-label">🅿️ PARC<br><small>Gratuit</small></div>
+                        {% elif space.type == 'go_to_jail' %}
+                            <div class="gtj-label">→ 🔒<br><small>Prison</small></div>
+                        {% elif space.type in ['chance', 'community_chest'] %}
+                            <div class="card-icon">{{ '🃏' if space.type == 'chance' else '📦' }}</div>
+                            <div class="cell-name-small">{{ 'Chance' if space.type == 'chance' else 'Caisse' }}</div>
+                        {% endif %}
+                        <div class="cell-tokens" id="tokens-{{ space.pos }}"></div>
+                        <div class="cell-houses" id="houses-{{ space.pos }}"></div>
+                    </div>
+                </div>
+                {% endfor %}
+                <!-- CENTER AREA -->
+                <div class="board-center">
+                    <div class="center-title">🏠 PROPERTY<br>TYCOON</div>
+                    <div id="center-dice" class="center-dice">🎲🎲</div>
+                    <div id="center-turn" class="center-turn"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT: PANEL -->
+        <div class="side-panel">
+
+            <!-- Current player info -->
+            <div class="panel-box" id="my-info-box">
+                <div class="panel-label">MON STATUT</div>
+                <div id="my-status"></div>
+            </div>
+
+            <!-- Action buttons -->
+            <div class="panel-box" id="actions-box">
+                <div class="panel-label">ACTIONS</div>
+                <div id="action-btns" class="action-btns"></div>
+            </div>
+
+            <!-- All players -->
+            <div class="panel-box">
+                <div class="panel-label">JOUEURS</div>
+                <div id="players-panel"></div>
+            </div>
+
+            <!-- My properties -->
+            <div class="panel-box">
+                <div class="panel-label">MES PROPRIÉTÉS</div>
+                <div id="my-props-panel"></div>
+            </div>
+
+            <!-- Game log -->
+            <div class="panel-box log-box">
+                <div class="panel-label">📋 JOURNAL</div>
+                <div id="game-log"></div>
+            </div>
+
+            <!-- Chat -->
+            <div class="panel-box chat-box">
+                <div class="panel-label">💬 CHAT</div>
+                <div id="chat-messages"></div>
+                <div class="chat-input-row">
+                    <input id="chat-input" type="text" placeholder="Message…" maxlength="200" onkeydown="if(event.key==='Enter')sendChat()">
+                    <button onclick="sendChat()">➤</button>
+                </div>
+            </div>
+
+            <a href="/tycoon" class="btn-tycoon btn-ghost btn-full" style="margin-top:4px;">🚪 QUITTER</a>
+        </div>
+    </div>
+</div>
+
+<!-- DATA FROM SERVER -->
+<script>
+    var ROOM_ID     = "{{ room_id }}";
+    var MY_USERNAME = "{{ username }}";
+    var LOCAL_IP    = "{{ local_ip }}";
+    var BOARD_DATA  = {{ board | tojson }};
+</script>
+<script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/monopoly.js') }}"></script>
+</body>
+</html>

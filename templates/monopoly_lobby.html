@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Property Tycoon — Lobby</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/monopoly.css') }}">
+</head>
+<body>
+
+<div class="lobby-wrap">
+    <div class="lobby-card">
+        <div class="logo-area">
+            <span class="logo-icon">🏠</span>
+            <h1>PROPERTY TYCOON</h1>
+            <p class="subtitle">Jeu multijoueur LAN — Bonjour <strong>{{ username }}</strong></p>
+        </div>
+
+        <!-- Main actions -->
+        <div id="main-btns" class="main-btns">
+            <button class="btn-tycoon btn-create" onclick="createGame()">
+                <span class="btn-icon">➕</span>
+                <span>CRÉER UNE PARTIE</span>
+                <small>Vous serez l'hôte</small>
+            </button>
+            <button class="btn-tycoon btn-join" onclick="showJoin()">
+                <span class="btn-icon">🔗</span>
+                <span>REJOINDRE VIA CODE</span>
+                <small>Entrez l'ID du salon</small>
+            </button>
+            <button class="btn-tycoon btn-list" onclick="refreshRooms()">
+                <span class="btn-icon">📋</span>
+                <span>SALONS OUVERTS</span>
+                <small>Rejoindre une partie</small>
+            </button>
+        </div>
+
+        <!-- Join by code panel -->
+        <div id="join-panel" class="panel hidden">
+            <h2>Rejoindre un salon</h2>
+            <input id="join-code" type="text" placeholder="Code du salon (ex: mono_abc123)" maxlength="30">
+            <div class="btn-row">
+                <button class="btn-tycoon btn-create" onclick="joinByCode()">REJOINDRE</button>
+                <button class="btn-tycoon btn-ghost" onclick="hideJoin()">RETOUR</button>
+            </div>
+        </div>
+
+        <!-- Open rooms list -->
+        <div id="rooms-panel" class="panel hidden">
+            <div class="rooms-header">
+                <h2>Salons en attente</h2>
+                <button class="btn-small" onclick="refreshRooms()">🔄</button>
+            </div>
+            <div id="rooms-list"></div>
+            <button class="btn-tycoon btn-ghost" style="margin-top:16px;width:100%;" onclick="hideRooms()">RETOUR</button>
+        </div>
+
+        <!-- Error message -->
+        <div id="error-msg" class="error-msg hidden"></div>
+
+        <div class="footer-links">
+            <a href="/">♟️ Chess Arena</a>
+            <a href="/logout">🚪 Déconnexion</a>
+        </div>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/socket.io.min.js') }}"></script>
+<script>
+    var socket = io();
+    var MY_USERNAME = "{{ username }}";
+
+    socket.on('connect', function() {
+        socket.emit('mono_get_rooms');
+    });
+
+    socket.on('mono_created', function(data) {
+        window.location.href = '/tycoon/game/' + data.room_id;
+    });
+
+    socket.on('mono_joined', function(data) {
+        // room_id stored on window before emit
+        window.location.href = '/tycoon/game/' + window._joinRoomId;
+    });
+
+    socket.on('mono_error', function(data) {
+        showError(data.msg);
+    });
+
+    socket.on('mono_rooms', function(rooms) {
+        var list = document.getElementById('rooms-list');
+        if (!rooms.length) {
+            list.innerHTML = '<p style="color:#888;text-align:center;padding:20px;">Aucun salon ouvert pour le moment.</p>';
+            return;
+        }
+        list.innerHTML = rooms.map(function(r) {
+            return '<div class="room-item" onclick="joinRoom(\'' + r.room_id + '\')">' +
+                   '<div class="room-host">🏠 ' + escHtml(r.host) + '</div>' +
+                   '<div class="room-info">' + r.players + '/6 joueur(s)</div>' +
+                   '<div class="room-join">REJOINDRE →</div>' +
+                   '</div>';
+        }).join('');
+    });
+
+    function createGame() {
+        clearError();
+        socket.emit('mono_create', {});
+    }
+
+    function showJoin() {
+        document.getElementById('main-btns').classList.add('hidden');
+        document.getElementById('join-panel').classList.remove('hidden');
+        document.getElementById('rooms-panel').classList.add('hidden');
+    }
+
+    function hideJoin() {
+        document.getElementById('main-btns').classList.remove('hidden');
+        document.getElementById('join-panel').classList.add('hidden');
+    }
+
+    function joinByCode() {
+        var code = document.getElementById('join-code').value.trim();
+        if (!code) { showError('Entrez un code de salon.'); return; }
+        window._joinRoomId = code;
+        socket.emit('mono_join', { room_id: code });
+    }
+
+    function refreshRooms() {
+        document.getElementById('main-btns').classList.add('hidden');
+        document.getElementById('join-panel').classList.add('hidden');
+        document.getElementById('rooms-panel').classList.remove('hidden');
+        socket.emit('mono_get_rooms');
+    }
+
+    function hideRooms() {
+        document.getElementById('main-btns').classList.remove('hidden');
+        document.getElementById('rooms-panel').classList.add('hidden');
+    }
+
+    function joinRoom(room_id) {
+        window._joinRoomId = room_id;
+        socket.emit('mono_join', { room_id: room_id });
+    }
+
+    function showError(msg) {
+        var el = document.getElementById('error-msg');
+        el.textContent = '⚠️ ' + msg;
+        el.classList.remove('hidden');
+        setTimeout(function() { el.classList.add('hidden'); }, 4000);
+    }
+
+    function clearError() {
+        document.getElementById('error-msg').classList.add('hidden');
+    }
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+</script>
+</body>
+</html>
