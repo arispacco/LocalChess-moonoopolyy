@@ -36,7 +36,7 @@ jobs:
             sleep 1
           done
         env:
-          SECRET_KEY: preview_secret_key
+          SECRET_KEY: ${{ secrets.PREVIEW_SECRET_KEY || 'preview_secret_key_ci_only' }}
 
       - name: Smoke tests
         run: |
@@ -79,6 +79,6 @@ jobs:
             cat /tmp/lt.log || true
           fi
 
-          # Keep tunnel alive for manual testing
+          # Keep tunnel alive for manual testing (5 minutes)
           sleep 300
           kill $LT_PID 2>/dev/null || true
