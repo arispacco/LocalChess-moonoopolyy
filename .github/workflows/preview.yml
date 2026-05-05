@@ -1,0 +1,84 @@
+name: Preview & Smoke Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Stockfish
+        run: sudo apt-get install -y stockfish
+
+      - name: Start Flask app
+        run: |
+          python app.py &
+          echo $! > /tmp/flask.pid
+          # Wait until the app is accepting connections (up to 15 s)
+          for i in $(seq 1 15); do
+            curl -sf http://127.0.0.1:5000/login -o /dev/null && break
+            sleep 1
+          done
+        env:
+          SECRET_KEY: ${{ secrets.PREVIEW_SECRET_KEY || 'preview_secret_key_ci_only' }}
+
+      - name: Smoke tests
+        run: |
+          echo "--- Smoke tests ---"
+          curl -sf http://127.0.0.1:5000/login        -o /dev/null && echo "✅  GET /login        → 200"
+          curl -sf http://127.0.0.1:5000/             -o /dev/null && echo "✅  GET /             → 200" || echo "↩️  GET /             → redirect (expected without login)"
+          curl -sf http://127.0.0.1:5000/tycoon       -o /dev/null && echo "✅  GET /tycoon       → 200" || echo "↩️  GET /tycoon       → redirect (expected without login)"
+          curl -sf http://127.0.0.1:5000/api/leaderboard -o /dev/null && echo "✅  GET /api/leaderboard → 200"
+          echo "--- All smoke tests done ---"
+
+      - name: Set up Node.js for localtunnel
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Expose app via localtunnel
+        run: |
+          npm install -g localtunnel
+          npx localtunnel --port 5000 > /tmp/lt.log 2>&1 &
+          LT_PID=$!
+          # Wait for the tunnel URL to appear in the log
+          for i in $(seq 1 20); do
+            URL=$(grep -oP 'https://[^ ]+\.loca\.lt' /tmp/lt.log | head -1)
+            [ -n "$URL" ] && break
+            sleep 1
+          done
+
+          if [ -n "$URL" ]; then
+            echo ""
+            echo "╔══════════════════════════════════════════════════════╗"
+            echo "║  🌐  Live preview URL                                ║"
+            echo "║  $URL"
+            echo "╚══════════════════════════════════════════════════════╝"
+            echo ""
+            echo "Open the URL above in your browser."
+            echo "If prompted for a tunnel password, visit https://loca.lt/mytunnelpassword"
+            echo "The tunnel stays open for 5 minutes."
+          else
+            echo "⚠️  Could not retrieve tunnel URL. App is still running on the runner (port 5000)."
+            cat /tmp/lt.log || true
+          fi
+
+          # Keep tunnel alive for manual testing (5 minutes)
+          sleep 300
+          kill $LT_PID 2>/dev/null || true
